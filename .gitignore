@@ -4,10 +4,8 @@
 *.rej
 
 *~
-*.a
 *.lo
 *.o
-*.dylib
 
 *.gcda
 *.gcno
@@ -110,3 +108,4 @@ RelWithDebInfo
 # Test datasets
 test/data/corpora/
 test/data/local/
+/user/release/_build

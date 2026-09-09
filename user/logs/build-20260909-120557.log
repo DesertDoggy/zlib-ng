@@ -1,0 +1,2 @@
+[INFO] Auto-detected host platform 'mac' from 'Darwin'.
+[ERROR] cmake was not found. Install cmake and retry.

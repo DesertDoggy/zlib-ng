@@ -1,0 +1,418 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
+USER_DIR="${ROOT_DIR}/user"
+RELEASE_DIR="${USER_DIR}/release"
+BUILD_ROOT="${RELEASE_DIR}/_build"
+LOG_DIR="${USER_DIR}/logs"
+
+PLATFORM=""
+PLATFORM_SET=0
+CLEAN=1
+VERSION_OVERRIDE=""
+C_STANDARD_MODE="auto"
+USED_C_STANDARD=""
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+LOG_FILE="${LOG_DIR}/build-${TIMESTAMP}.log"
+
+mkdir -p "${LOG_DIR}" "${RELEASE_DIR}" "${BUILD_ROOT}"
+: > "${LOG_FILE}"
+
+log_line() {
+    level="$1"
+    shift
+    msg="$*"
+    line="[${level}] ${msg}"
+    printf '%s\n' "${line}"
+    printf '%s\n' "${line}" >> "${LOG_FILE}"
+}
+
+run_and_log() {
+    log_line INFO "RUN: $*"
+    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
+    if "$@" > "${tmp_log}" 2>&1; then
+        cat "${tmp_log}" | tee -a "${LOG_FILE}"
+        rm -f "${tmp_log}"
+        return 0
+    fi
+
+    rc=$?
+    cat "${tmp_log}" | tee -a "${LOG_FILE}"
+    rm -f "${tmp_log}"
+    log_line ERROR "Command failed (exit=${rc}): $*"
+    return "${rc}"
+}
+
+usage() {
+    cat << 'EOF'
+Usage:
+  sh user/scripts/build-zlib-ng-release.sh [options]
+
+Options:
+    --platform <mac|ios|android|linux|windows>
+    --clean
+    --no-clean
+  --version <value>
+  --c-standard <auto|23|11>
+  --help
+
+Environment variables:
+  IOS_TOOLCHAIN_FILE        Required for --platform ios
+  IOS_SYSROOT               Optional for iOS (default: iphoneos)
+  ANDROID_NDK_HOME          Required for --platform android
+  ANDROID_PLATFORM          Optional for Android (default: android-24)
+  WINDOWS_TOOLCHAIN_FILE    Optional override for Windows x64 toolchain
+  LINUX_X64_TOOLCHAIN_FILE  Optional for Linux x64 cross build
+  LINUX_X64_CC              Optional x86_64 Linux C compiler path/name
+  JOBS                      Optional build parallelism (default: host CPU count)
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --platform)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --platform"; exit 2; }
+            PLATFORM="$2"
+            PLATFORM_SET=1
+            shift 2
+            ;;
+        --clean)
+            CLEAN=1
+            shift
+            ;;
+        --no-clean)
+            CLEAN=0
+            shift
+            ;;
+        --version)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --version"; exit 2; }
+            VERSION_OVERRIDE="$2"
+            shift 2
+            ;;
+        --c-standard)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --c-standard"; exit 2; }
+            C_STANDARD_MODE="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            log_line ERROR "Unknown argument: $1"
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+if [ "${PLATFORM_SET}" -eq 1 ]; then
+    case "${PLATFORM}" in
+        mac|ios|android|linux|windows) ;;
+        *) log_line ERROR "Invalid --platform value: ${PLATFORM}"; exit 2 ;;
+    esac
+else
+    host_os=$(uname -s)
+    case "${host_os}" in
+        Darwin)
+            PLATFORM="mac"
+            ;;
+        Linux)
+            PLATFORM="linux"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            PLATFORM="windows"
+            ;;
+        *)
+            log_line ERROR "Unsupported host OS: ${host_os}. Use --platform to select a target explicitly."
+            exit 2
+            ;;
+    esac
+    log_line INFO "Auto-detected host platform '${PLATFORM}' from '${host_os}'."
+fi
+
+case "${C_STANDARD_MODE}" in
+    auto|23|11) ;;
+    *) log_line ERROR "Invalid --c-standard value: ${C_STANDARD_MODE}"; exit 2 ;;
+esac
+
+if ! command -v cmake >/dev/null 2>&1; then
+    log_line ERROR "cmake was not found. Install cmake and retry."
+    exit 2
+fi
+
+if [ -n "${VERSION_OVERRIDE}" ]; then
+    VERSION="${VERSION_OVERRIDE}"
+    log_line INFO "Using version override: ${VERSION}"
+else
+    VERSION=$(sed -n 's/^#define[[:space:]][[:space:]]*ZLIBNG_VERSION[[:space:]][[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT_DIR}/zlib-ng.h.in" | head -n 1)
+    if [ -z "${VERSION}" ]; then
+        HEADER_ZLIB=$(sed -n 's/^#define[[:space:]][[:space:]]*ZLIB_VERSION[[:space:]][[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT_DIR}/zlib.h.in" | head -n 1)
+        if [ -n "${HEADER_ZLIB}" ]; then
+            VERSION="${HEADER_ZLIB}.zlib-ng"
+            log_line FALLBACK "Could not read ZLIBNG_VERSION. Fallback to ${VERSION} from zlib.h.in."
+        else
+            VERSION=$(date +%Y%m%d)
+            log_line FALLBACK "Could not read repo version. Fallback to datestamp ${VERSION}."
+        fi
+    else
+        log_line INFO "Using repo version: ${VERSION}"
+    fi
+fi
+
+if [ "${CLEAN}" -eq 1 ]; then
+    log_line INFO "Cleaning build root ${BUILD_ROOT}"
+    rm -rf "${BUILD_ROOT}"
+    mkdir -p "${BUILD_ROOT}"
+fi
+
+JOBS_DEFAULT=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+JOBS=${JOBS:-${JOBS_DEFAULT}}
+
+COMMON_DEFS="-DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DZLIB_ALIASES=ON -DWITH_GZFILEOP=ON -DWITH_OPTIM=ON -DWITH_CRC32_CHORBA=ON -DWITH_REDUCED_MEM=OFF -DBUILD_TESTING=OFF -DWITH_GTEST=OFF -DWITH_BENCHMARKS=OFF"
+X64_ISA_DEFS="-DWITH_AVX2=ON -DWITH_AVX512=ON -DWITH_AVX512VNNI=ON -DWITH_VPCLMULQDQ=ON"
+ARM_ISA_DEFS="-DWITH_ARMV8=ON -DWITH_NEON=ON"
+
+copy_unique() {
+    src="$1"
+    dest_dir="$2"
+    target_name="${3:-$(basename "${src}")}"
+    mkdir -p "${dest_dir}"
+    cp -f "${src}" "${dest_dir}/${target_name}"
+}
+
+collect_artifacts() {
+    build_dir="$1"
+    platform_name="$2"
+    arch_name="$3"
+    used_c_std="$4"
+    all_defs="$5"
+
+    out_base="${RELEASE_DIR}/${platform_name}/${arch_name}/${VERSION}"
+    out_static="${out_base}/static"
+    out_dynamic="${out_base}/dynamic"
+    out_include="${out_base}/include"
+
+    mkdir -p "${out_static}" "${out_dynamic}" "${out_include}"
+
+    find "${build_dir}" -type f \( -name '*.a' -o -name '*.lib' -o -name '*.so' -o -name '*.so.*' -o -name '*.dylib' -o -name '*.dll' -o -name '*.dll.a' \) | while IFS= read -r f; do
+        name=$(basename "${f}")
+        case "${name}" in
+            *.dylib)
+                copy_unique "${f}" "${out_dynamic}" "libz.dylib"
+                ;;
+            *.so|*.so.*)
+                copy_unique "${f}" "${out_dynamic}" "libz.so"
+                ;;
+            *.dll)
+                copy_unique "${f}" "${out_dynamic}" "zlib.dll"
+                ;;
+            *.dll.a)
+                copy_unique "${f}" "${out_dynamic}" "zlib.dll.a"
+                ;;
+            *.lib)
+                case "${name}" in
+                    *static*) copy_unique "${f}" "${out_static}" "libz.a" ;;
+                    *) copy_unique "${f}" "${out_dynamic}" "zlib.lib" ;;
+                esac
+                ;;
+            *.a)
+                copy_unique "${f}" "${out_static}" "libz.a"
+                ;;
+        esac
+    done
+
+    for h in zlib.h zconf.h zlib_name_mangling.h zlib_name_mangling-ng.h zlib-ng.h; do
+        if [ -f "${build_dir}/${h}" ]; then
+            copy_unique "${build_dir}/${h}" "${out_include}"
+        elif [ -f "${ROOT_DIR}/${h}" ]; then
+            copy_unique "${ROOT_DIR}/${h}" "${out_include}"
+        fi
+    done
+
+    {
+        echo "timestamp=${TIMESTAMP}"
+        echo "platform=${platform_name}"
+        echo "arch=${arch_name}"
+        echo "version=${VERSION}"
+        echo "c_standard=${used_c_std}"
+        echo "cmake=$(cmake --version | head -n 1)"
+        echo "git_commit=$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        echo "definitions=${all_defs} -DCMAKE_C_STANDARD=${used_c_std}"
+        echo "log_file=${LOG_FILE}"
+    } > "${out_base}/build-info.txt"
+
+    log_line INFO "Artifacts saved to ${out_base}"
+}
+
+configure_with_fallback() {
+    build_dir="$1"
+    defs="$2"
+
+    standards=""
+    case "${C_STANDARD_MODE}" in
+        auto) standards="23 11" ;;
+        23) standards="23" ;;
+        11) standards="11" ;;
+    esac
+
+    first_std=$(printf '%s\n' ${standards} | head -n 1)
+
+    for std in ${standards}; do
+        rm -rf "${build_dir}"
+        mkdir -p "${build_dir}"
+
+        log_line INFO "Configuring with C standard ${std}"
+        tmp_log="${LOG_DIR}/.cfg-$$-$(date +%s).log"
+        if cmake -S "${ROOT_DIR}" -B "${build_dir}" ${defs} -DCMAKE_C_STANDARD="${std}" > "${tmp_log}" 2>&1; then
+            cat "${tmp_log}" | tee -a "${LOG_FILE}"
+            rm -f "${tmp_log}"
+            USED_C_STANDARD="${std}"
+            if [ "${std}" != "${first_std}" ]; then
+                log_line FALLBACK "Configured with C${std} after earlier standard failed."
+            fi
+            return 0
+        fi
+
+        cat "${tmp_log}" | tee -a "${LOG_FILE}"
+        rm -f "${tmp_log}"
+
+        if [ "${C_STANDARD_MODE}" = "auto" ] && [ "${std}" = "23" ]; then
+            log_line FALLBACK "C23 configure failed. Retrying with C11."
+        else
+            log_line ERROR "Configure failed with C${std}."
+            return 1
+        fi
+    done
+
+    log_line ERROR "All C standard configure attempts failed."
+    return 1
+}
+
+build_one() {
+    platform_name="$1"
+    arch_name="$2"
+    extra_defs="$3"
+
+    build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
+    defs="${COMMON_DEFS} ${extra_defs}"
+
+    if ! configure_with_fallback "${build_dir}" "${defs}"; then
+        return 1
+    fi
+
+    if ! run_and_log cmake --build "${build_dir}" --config Release -j "${JOBS}"; then
+        return 1
+    fi
+
+    collect_artifacts "${build_dir}" "${platform_name}" "${arch_name}" "${USED_C_STANDARD}" "${defs}"
+    return 0
+}
+
+build_mac() {
+    log_line INFO "Starting mac/arm64 build"
+    build_one mac arm64 "-DCMAKE_OSX_ARCHITECTURES=arm64 ${ARM_ISA_DEFS}"
+}
+
+build_ios() {
+    log_line INFO "Starting ios/arm64 build"
+    if [ -z "${IOS_TOOLCHAIN_FILE:-}" ]; then
+        log_line ERROR "IOS_TOOLCHAIN_FILE is not set. Export IOS_TOOLCHAIN_FILE and retry."
+        return 1
+    fi
+    if [ ! -f "${IOS_TOOLCHAIN_FILE}" ]; then
+        log_line ERROR "IOS_TOOLCHAIN_FILE does not exist: ${IOS_TOOLCHAIN_FILE}"
+        return 1
+    fi
+
+    ios_sysroot=${IOS_SYSROOT:-iphoneos}
+    build_one ios arm64 "-DCMAKE_TOOLCHAIN_FILE=${IOS_TOOLCHAIN_FILE} -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=${ios_sysroot} -DCMAKE_OSX_ARCHITECTURES=arm64 ${ARM_ISA_DEFS}"
+}
+
+build_android() {
+    log_line INFO "Starting android/arm64 build"
+    if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+        log_line ERROR "ANDROID_NDK_HOME is not set. Export ANDROID_NDK_HOME and retry."
+        return 1
+    fi
+
+    ndk_toolchain="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake"
+    if [ ! -f "${ndk_toolchain}" ]; then
+        log_line ERROR "Android toolchain not found: ${ndk_toolchain}"
+        return 1
+    fi
+
+    android_platform=${ANDROID_PLATFORM:-android-24}
+    build_one android arm64 "-DCMAKE_TOOLCHAIN_FILE=${ndk_toolchain} -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=${android_platform} ${ARM_ISA_DEFS}"
+}
+
+build_linux() {
+    log_line INFO "Starting linux/x64 build"
+
+    uname_s=$(uname -s)
+    extra=""
+
+    if [ -n "${LINUX_X64_TOOLCHAIN_FILE:-}" ]; then
+        if [ ! -f "${LINUX_X64_TOOLCHAIN_FILE}" ]; then
+            log_line ERROR "LINUX_X64_TOOLCHAIN_FILE does not exist: ${LINUX_X64_TOOLCHAIN_FILE}"
+            return 1
+        fi
+        extra="-DCMAKE_TOOLCHAIN_FILE=${LINUX_X64_TOOLCHAIN_FILE}"
+    elif [ -n "${LINUX_X64_CC:-}" ]; then
+        extra="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER=${LINUX_X64_CC}"
+    elif [ "${uname_s}" != "Linux" ]; then
+        log_line ERROR "linux/x64 build on non-Linux host needs LINUX_X64_TOOLCHAIN_FILE or LINUX_X64_CC."
+        return 1
+    fi
+
+    build_one linux x64 "${extra} ${X64_ISA_DEFS}"
+}
+
+build_windows() {
+    log_line INFO "Starting windows/x64 build"
+    toolchain=${WINDOWS_TOOLCHAIN_FILE:-${ROOT_DIR}/cmake/toolchain-llvm-mingw-x86_64.cmake}
+
+    if [ ! -f "${toolchain}" ]; then
+        log_line ERROR "Windows toolchain file not found: ${toolchain}"
+        return 1
+    fi
+
+    build_one windows x64 "-DCMAKE_TOOLCHAIN_FILE=${toolchain} ${X64_ISA_DEFS}"
+}
+
+platforms="${PLATFORM}"
+
+failures=""
+
+for p in ${platforms}; do
+    case "${p}" in
+        mac)
+            if ! build_mac; then failures="${failures} mac/arm64"; fi
+            ;;
+        ios)
+            if ! build_ios; then failures="${failures} ios/arm64"; fi
+            ;;
+        android)
+            if ! build_android; then failures="${failures} android/arm64"; fi
+            ;;
+        linux)
+            if ! build_linux; then failures="${failures} linux/x64"; fi
+            ;;
+        windows)
+            if ! build_windows; then failures="${failures} windows/x64"; fi
+            ;;
+    esac
+done
+
+if [ -n "${failures}" ]; then
+    log_line ERROR "Build completed with failures:${failures}"
+    log_line ERROR "See full details in ${LOG_FILE}"
+    exit 1
+fi
+
+log_line INFO "Build completed successfully for: ${platforms}"
+log_line INFO "Release root: ${RELEASE_DIR}"
+log_line INFO "Log file: ${LOG_FILE}"
