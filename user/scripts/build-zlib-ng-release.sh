@@ -33,15 +33,15 @@ log_line() {
 run_and_log() {
     log_line INFO "RUN: $*"
     tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
-    if "$@" > "${tmp_log}" 2>&1; then
-        cat "${tmp_log}" | tee -a "${LOG_FILE}"
-        rm -f "${tmp_log}"
+    rc=0
+    "$@" > "${tmp_log}" 2>&1 || rc=$?
+    cat "${tmp_log}" | tee -a "${LOG_FILE}"
+    rm -f "${tmp_log}"
+
+    if [ "${rc}" -eq 0 ]; then
         return 0
     fi
 
-    rc=$?
-    cat "${tmp_log}" | tee -a "${LOG_FILE}"
-    rm -f "${tmp_log}"
     log_line ERROR "Command failed (exit=${rc}): $*"
     return "${rc}"
 }
@@ -248,7 +248,7 @@ collect_artifacts() {
     log_line INFO "Artifacts saved to ${out_base}"
 }
 
-configure_with_fallback() {
+configure_and_build_with_fallback() {
     build_dir="$1"
     defs="$2"
 
@@ -260,35 +260,50 @@ configure_with_fallback() {
     esac
 
     first_std=$(printf '%s\n' ${standards} | head -n 1)
+    last_std=$(printf '%s\n' ${standards} | tail -n 1)
 
     for std in ${standards}; do
+        can_retry=0
+        if [ "${C_STANDARD_MODE}" = "auto" ] && [ "${std}" != "${last_std}" ]; then
+            can_retry=1
+        fi
+
         rm -rf "${build_dir}"
         mkdir -p "${build_dir}"
 
         log_line INFO "Configuring with C standard ${std}"
         tmp_log="${LOG_DIR}/.cfg-$$-$(date +%s).log"
-        if cmake -S "${ROOT_DIR}" -B "${build_dir}" ${defs} -DCMAKE_C_STANDARD="${std}" > "${tmp_log}" 2>&1; then
+        if ! cmake -S "${ROOT_DIR}" -B "${build_dir}" ${defs} -DCMAKE_C_STANDARD="${std}" > "${tmp_log}" 2>&1; then
             cat "${tmp_log}" | tee -a "${LOG_FILE}"
             rm -f "${tmp_log}"
-            USED_C_STANDARD="${std}"
-            if [ "${std}" != "${first_std}" ]; then
-                log_line FALLBACK "Configured with C${std} after earlier standard failed."
+            if [ "${can_retry}" -eq 1 ]; then
+                log_line FALLBACK "C${std} configure failed. Retrying with next standard."
+                continue
             fi
-            return 0
-        fi
-
-        cat "${tmp_log}" | tee -a "${LOG_FILE}"
-        rm -f "${tmp_log}"
-
-        if [ "${C_STANDARD_MODE}" = "auto" ] && [ "${std}" = "23" ]; then
-            log_line FALLBACK "C23 configure failed. Retrying with C11."
-        else
             log_line ERROR "Configure failed with C${std}."
             return 1
         fi
+        cat "${tmp_log}" | tee -a "${LOG_FILE}"
+        rm -f "${tmp_log}"
+        USED_C_STANDARD="${std}"
+        if [ "${std}" != "${first_std}" ]; then
+            log_line FALLBACK "Configured with C${std} after earlier standard failed."
+        fi
+
+        if run_and_log cmake --build "${build_dir}" --config Release -j "${JOBS}"; then
+            return 0
+        fi
+
+        if [ "${can_retry}" -eq 1 ]; then
+            log_line FALLBACK "Build failed with C${std}. Retrying with next standard."
+            continue
+        fi
+
+        log_line ERROR "Build failed with C${std}."
+        return 1
     done
 
-    log_line ERROR "All C standard configure attempts failed."
+    log_line ERROR "All C standard configure/build attempts failed."
     return 1
 }
 
@@ -300,11 +315,7 @@ build_one() {
     build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
     defs="${COMMON_DEFS} ${extra_defs}"
 
-    if ! configure_with_fallback "${build_dir}" "${defs}"; then
-        return 1
-    fi
-
-    if ! run_and_log cmake --build "${build_dir}" --config Release -j "${JOBS}"; then
+    if ! configure_and_build_with_fallback "${build_dir}" "${defs}"; then
         return 1
     fi
 
@@ -373,6 +384,17 @@ build_linux() {
 
 build_windows() {
     log_line INFO "Starting windows/x64 build"
+
+    if [ -z "${WINDOWS_TOOLCHAIN_FILE:-}" ]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*)
+                log_line INFO "Native Windows host detected; using host MinGW-w64 toolchain directly (no cross toolchain file)."
+                build_one windows x64 "${X64_ISA_DEFS}"
+                return $?
+                ;;
+        esac
+    fi
+
     toolchain=${WINDOWS_TOOLCHAIN_FILE:-${ROOT_DIR}/cmake/toolchain-llvm-mingw-x86_64.cmake}
 
     if [ ! -f "${toolchain}" ]; then

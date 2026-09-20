@@ -109,3 +109,4 @@ RelWithDebInfo
 test/data/corpora/
 test/data/local/
 /user/release/_build
+/user/logs
