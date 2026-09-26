@@ -1,9 +1,9 @@
-timestamp=20260920-084420
+timestamp=20260926-162812
 platform=windows
 arch=x64
 version=2.3.90
 c_standard=11
 cmake=cmake version 4.4.2
-git_commit=ab540e8b
+git_commit=330d3e74
 definitions=-DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DZLIB_ALIASES=ON -DWITH_GZFILEOP=ON -DWITH_OPTIM=ON -DWITH_CRC32_CHORBA=ON -DWITH_REDUCED_MEM=OFF -DBUILD_TESTING=OFF -DWITH_GTEST=OFF -DWITH_BENCHMARKS=OFF -DWITH_AVX2=ON -DWITH_AVX512=ON -DWITH_AVX512VNNI=ON -DWITH_VPCLMULQDQ=ON -DCMAKE_C_STANDARD=11
-log_file=/d/Documents/GitHub/romexplorer/submodules/zlib-ng/user/logs/build-20260920-084420.log
+log_file=/d/Documents/GitHub/romexplorer/submodules/zlib-ng/user/logs/build-20260926-162812.log
