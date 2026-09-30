@@ -10,6 +10,7 @@ LOG_DIR="${USER_DIR}/logs"
 
 PLATFORM=""
 PLATFORM_SET=0
+ARCH=""
 CLEAN=1
 VERSION_OVERRIDE=""
 C_STANDARD_MODE="auto"
@@ -53,6 +54,7 @@ Usage:
 
 Options:
     --platform <mac|ios|android|linux|windows>
+    --arch <x64|arm64>   linux/windows only (default: the host's); mac/ios/android are arm64
     --clean
     --no-clean
   --version <value>
@@ -67,12 +69,22 @@ Environment variables:
   WINDOWS_TOOLCHAIN_FILE    Optional override for Windows x64 toolchain
   LINUX_X64_TOOLCHAIN_FILE  Optional for Linux x64 cross build
   LINUX_X64_CC              Optional x86_64 Linux C compiler path/name
+  LINUX_ARM64_TOOLCHAIN_FILE Optional for linux/arm64 from a non-arm64 host (default:
+                            cmake/toolchain-aarch64.cmake, needs gcc-aarch64-linux-gnu)
+  WINDOWS_ARM64_TOOLCHAIN_FILE Optional for windows/arm64 (default:
+                            cmake/toolchain-llvm-mingw-aarch64.cmake, needs llvm-mingw's
+                            aarch64-w64-mingw32-clang on PATH)
   JOBS                      Optional build parallelism (default: host CPU count)
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --arch)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --arch"; exit 2; }
+            ARCH="$2"
+            shift 2
+            ;;
         --platform)
             [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --platform"; exit 2; }
             PLATFORM="$2"
@@ -133,6 +145,22 @@ else
     esac
     log_line INFO "Auto-detected host platform '${PLATFORM}' from '${host_os}'."
 fi
+
+case "$(uname -m)" in
+    arm64|aarch64) HOST_ARCH="arm64" ;;
+    *) HOST_ARCH="x64" ;;
+esac
+case "${ARCH}" in
+    "") case "${PLATFORM}" in mac|ios|android) ARCH="arm64" ;; *) ARCH="${HOST_ARCH}" ;; esac ;;
+    x64|arm64) ;;
+    aarch64) ARCH="arm64" ;;
+    x86_64|amd64) ARCH="x64" ;;
+    *) log_line ERROR "Invalid --arch value: ${ARCH} (expected x64 or arm64)"; exit 2 ;;
+esac
+case "${PLATFORM}/${ARCH}" in
+    mac/arm64|ios/arm64|android/arm64|linux/x64|linux/arm64|windows/x64|windows/arm64) ;;
+    *) log_line ERROR "Unsupported target ${PLATFORM}/${ARCH}. Supported: mac/arm64 ios/arm64 android/arm64 linux/x64 linux/arm64 windows/x64 windows/arm64"; exit 2 ;;
+esac
 
 case "${C_STANDARD_MODE}" in
     auto|23|11) ;;
@@ -361,6 +389,7 @@ build_android() {
 }
 
 build_linux() {
+    [ "${ARCH}" = "arm64" ] && { build_linux_arm64; return $?; }
     log_line INFO "Starting linux/x64 build"
 
     uname_s=$(uname -s)
@@ -382,7 +411,45 @@ build_linux() {
     build_one linux x64 "${extra} ${X64_ISA_DEFS}"
 }
 
+# linux/arm64: native on an aarch64 Linux host, otherwise cross through zlib-ng's own
+# cmake/toolchain-aarch64.cmake (aarch64-linux-gnu-gcc, apt: gcc-aarch64-linux-gnu).
+build_linux_arm64() {
+    log_line INFO "Starting linux/arm64 build"
+    extra=""
+    if [ -n "${LINUX_ARM64_TOOLCHAIN_FILE:-}" ] || [ "$(uname -s)" != "Linux" ] || [ "${HOST_ARCH}" != "arm64" ]; then
+        toolchain="${LINUX_ARM64_TOOLCHAIN_FILE:-${ROOT_DIR}/cmake/toolchain-aarch64.cmake}"
+        if [ ! -f "${toolchain}" ]; then
+            log_line ERROR "linux/arm64 toolchain file not found: ${toolchain}"
+            return 1
+        fi
+        if [ -z "${LINUX_ARM64_TOOLCHAIN_FILE:-}" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+            log_line ERROR "aarch64-linux-gnu-gcc not found. Install gcc-aarch64-linux-gnu (or set LINUX_ARM64_TOOLCHAIN_FILE)."
+            return 1
+        fi
+        extra="-DCMAKE_TOOLCHAIN_FILE=${toolchain}"
+    fi
+    build_one linux arm64 "${extra} ${ARM_ISA_DEFS}"
+}
+
+# windows/arm64 goes through llvm-mingw on every host: MSYS2's MinGW64 gcc (what the x64
+# build uses) has no aarch64 target, and 7-Zip links this library the MinGW way, so an
+# MSVC build here would leave it nothing it could link.
+build_windows_arm64() {
+    log_line INFO "Starting windows/arm64 build"
+    toolchain="${WINDOWS_ARM64_TOOLCHAIN_FILE:-${ROOT_DIR}/cmake/toolchain-llvm-mingw-aarch64.cmake}"
+    if [ ! -f "${toolchain}" ]; then
+        log_line ERROR "windows/arm64 toolchain file not found: ${toolchain}"
+        return 1
+    fi
+    if [ -z "${WINDOWS_ARM64_TOOLCHAIN_FILE:-}" ] && ! command -v aarch64-w64-mingw32-clang >/dev/null 2>&1; then
+        log_line ERROR "aarch64-w64-mingw32-clang not found. Put llvm-mingw's bin/ on PATH (https://github.com/mstorsjo/llvm-mingw), or set WINDOWS_ARM64_TOOLCHAIN_FILE."
+        return 1
+    fi
+    build_one windows arm64 "-DCMAKE_TOOLCHAIN_FILE=${toolchain} ${ARM_ISA_DEFS}"
+}
+
 build_windows() {
+    [ "${ARCH}" = "arm64" ] && { build_windows_arm64; return $?; }
     log_line INFO "Starting windows/x64 build"
 
     if [ -z "${WINDOWS_TOOLCHAIN_FILE:-}" ]; then
@@ -421,10 +488,10 @@ for p in ${platforms}; do
             if ! build_android; then failures="${failures} android/arm64"; fi
             ;;
         linux)
-            if ! build_linux; then failures="${failures} linux/x64"; fi
+            if ! build_linux; then failures="${failures} linux/${ARCH}"; fi
             ;;
         windows)
-            if ! build_windows; then failures="${failures} windows/x64"; fi
+            if ! build_windows; then failures="${failures} windows/${ARCH}"; fi
             ;;
     esac
 done
@@ -435,6 +502,6 @@ if [ -n "${failures}" ]; then
     exit 1
 fi
 
-log_line INFO "Build completed successfully for: ${platforms}"
+log_line INFO "Build completed successfully for: ${platforms}/${ARCH}"
 log_line INFO "Release root: ${RELEASE_DIR}"
 log_line INFO "Log file: ${LOG_FILE}"
