@@ -186,7 +186,7 @@ else
             VERSION="${HEADER_ZLIB}.zlib-ng"
             log_line FALLBACK "Could not read ZLIBNG_VERSION. Fallback to ${VERSION} from zlib.h.in."
         else
-            VERSION=$(date +%Y%m%d)
+            VERSION=$(date +%Y%m%d-%H%M%S)
             log_line FALLBACK "Could not read repo version. Fallback to datestamp ${VERSION}."
         fi
     else
