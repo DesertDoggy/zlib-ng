@@ -111,3 +111,4 @@ test/data/local/
 /user/release/_build
 /user/logs
 user/release/linux/x64/2.3.90/build-info.txt
+/user/release
