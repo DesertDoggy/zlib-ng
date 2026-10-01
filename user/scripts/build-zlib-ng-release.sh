@@ -33,11 +33,14 @@ log_line() {
 
 run_and_log() {
     log_line INFO "RUN: $*"
-    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
-    rc=0
-    "$@" > "${tmp_log}" 2>&1 || rc=$?
-    cat "${tmp_log}" | tee -a "${LOG_FILE}"
-    rm -f "${tmp_log}"
+    # Streamed, not buffered until the command ends: a twenty-minute build that prints
+    # nothing looks exactly like a hang, and scripts/build_native_deps.sh shows the newest
+    # log line as progress. POSIX sh has no pipefail, so the status crosses the pipe in a file.
+    rc_file="${LOG_DIR}/.rc-$$"
+    rm -f "${rc_file}"
+    { rc=0; "$@" 2>&1 || rc=$?; echo "${rc}" > "${rc_file}"; } | tee -a "${LOG_FILE}"
+    rc=$(cat "${rc_file}" 2>/dev/null || echo 1)
+    rm -f "${rc_file}"
 
     if [ "${rc}" -eq 0 ]; then
         return 0
