@@ -1,9 +1,0 @@
-timestamp=20260930-232753
-platform=windows
-arch=x64
-version=2.3.90
-c_standard=11
-cmake=cmake version 4.4.2
-git_commit=460dc3c0
-definitions=-DCMAKE_BUILD_TYPE=Release -DZLIB_COMPAT=ON -DZLIB_ALIASES=ON -DWITH_GZFILEOP=ON -DWITH_OPTIM=ON -DWITH_CRC32_CHORBA=ON -DWITH_REDUCED_MEM=OFF -DBUILD_TESTING=OFF -DWITH_GTEST=OFF -DWITH_BENCHMARKS=OFF -DWITH_AVX2=ON -DWITH_AVX512=ON -DWITH_AVX512VNNI=ON -DWITH_VPCLMULQDQ=ON -DCMAKE_C_STANDARD=11
-log_file=/d/Documents/GitHub/romexplorer/submodules/zlib-ng/user/logs/build-20260930-232753.log
